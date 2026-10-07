@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Small command-line client for gcui-art/suno-api."""
 import argparse
+from concurrent.futures import ThreadPoolExecutor
+import http.client
 import json
 import os
 from pathlib import Path
@@ -9,15 +11,20 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
 
-VERSION = '0.1.1'
+VERSION = '0.2.0'
 BACKEND = Path(os.environ.get('SUNO_BACKEND_DIR', Path.home() / '.local/share/suno-api-cli/backend'))
 BUNDLED_BACKEND = Path(__file__).resolve().parent / 'backend'
 CREDENTIALS = Path.home() / '.config/suno-api-cli/credentials.json'
 USER_AGENT = 'OpenAI File Downloader, XaiImageApiFetch/1.0'
+AUDIO_EXTENSIONS = {
+    'm4a-opus': '.m4a', 'm4a': '.m4a', 'audio/mp4': '.m4a',
+    'mp3': '.mp3', 'audio/mpeg': '.mp3', 'wav': '.wav', 'audio/wav': '.wav',
+}
 
 
 def credentials():
@@ -134,12 +141,137 @@ def parser():
     generate.add_argument('--wait', action='store_true', help='Wait for audio before returning')
     listing = commands.add_parser('list', help='List songs, optionally by ID')
     listing.add_argument('ids', nargs='*')
-    download = commands.add_parser('download', help='Download a completed song')
-    download.add_argument('id')
+    download = commands.add_parser('download', help='Download songs by ID, song URL, or the whole library')
+    download.add_argument('ids', nargs='*')
+    download.add_argument('--all', action='store_true', help='Download all completed library songs')
+    download.add_argument('--metadata', action='store_true', help='Save prompts, lyrics and track metadata as JSON')
+    download.add_argument('--skip-existing', action='store_true', help='Skip existing nonempty downloads')
+    download.add_argument('--jobs', type=int, default=4, help='Parallel downloads, 1 to 16 (default: 4)')
     download.add_argument('--output', type=Path, default=Path.cwd())
     backend = commands.add_parser('server', help='Manage the local backend')
     backend.add_argument('action', choices=['run', 'install', 'start', 'stop', 'restart'])
     return cli
+
+
+def song_id(value):
+    if '://' in value:
+        url = urllib.parse.urlsplit(value)
+        if url.scheme != 'https' or url.netloc not in ('suno.com', 'www.suno.com'):
+            raise ValueError('Use a Suno song URL such as https://suno.com/song/TRACK_ID.')
+        match = re.fullmatch(r'/song/([A-Za-z0-9-]+)/?', url.path)
+        if not match:
+            raise ValueError('Use a /song/TRACK_ID URL, or a track ID.')
+        value = match[1]
+    if not re.fullmatch(r'[A-Za-z0-9-]+', value):
+        raise ValueError('Invalid track ID.')
+    return value
+
+
+def audio_header_matches(header, extension):
+    if extension == '.m4a':
+        return header[4:8] == b'ftyp'
+    if extension == '.wav':
+        return header[:4] == b'RIFF' and header[8:12] == b'WAVE'
+    return header[:3] == b'ID3' or (len(header) >= 2 and header[0] == 255 and header[1] & 224 == 224)
+
+
+def download_track(args, track):
+    track_id = song_id(track['id'])
+    if track.get('status') != 'complete':
+        raise RuntimeError('Track is not complete. Check `suno list`.')
+    # Suno's audio_url can be /api/forbidden even when progressive audio is available.
+    media = next((media for media in track.get('media_urls') or []
+                  if media.get('delivery') == 'progressive'
+                  and media.get('content_type') in AUDIO_EXTENSIONS and media.get('url')), None)
+    if not media:
+        raise RuntimeError('Track has no supported progressive audio in media_urls. Update the backend and check `suno list`.')
+    url = args.api_url.rstrip('/') + '/api/download?' + urllib.parse.urlencode({'id': track_id})
+    title = unicodedata.normalize('NFKD', track.get('title') or '').encode('ascii', 'ignore').decode()
+    title = re.sub(r'[^a-z0-9]+', '-', title.lower()).strip('-')[:80]
+    stem = f'{title}-{track_id}' if title else track_id
+    audio = args.output / (stem + AUDIO_EXTENSIONS[media['content_type']])
+    metadata = args.output / (stem + '.json') if args.metadata else None
+    paths = [audio, metadata] if metadata else [audio]
+    if args.skip_existing and all(path.is_file() and path.stat().st_size > 0 for path in paths):
+        with audio.open('rb') as stream:
+            if not audio_header_matches(stream.read(12), audio.suffix):
+                raise RuntimeError(f'Existing file is not playable audio: {audio}. Existing files were kept.')
+        return 'skipped', {'id': track_id, 'file': str(audio)}
+    if any(path.exists() for path in paths):
+        raise FileExistsError(f'Download already exists or is incomplete: {audio}. Existing files were kept.')
+    created = []
+    try:
+        # Exclusive creation protects existing files even when another process races this download.
+        with audio.open('xb') as stream:
+            created.append(audio)
+            request = urllib.request.Request(url, headers={'User-Agent': USER_AGENT})
+            with urllib.request.urlopen(request, timeout=args.timeout) as response:
+                if response.headers.get_content_type() in ('text/html', 'application/json'):
+                    raise RuntimeError('Audio host returned a page instead of audio.')
+                expected = response.headers.get('Content-Length')
+                size = 0
+                header = b''
+                while block := response.read(65536):
+                    if not header:
+                        header = block[:12]
+                    size += stream.write(block)
+                if not size or (expected is not None and size != int(expected)):
+                    raise RuntimeError('Audio response was empty or truncated.')
+                if not audio_header_matches(header, audio.suffix):
+                    raise RuntimeError('Backend did not return playable audio. The partial file was removed.')
+        entry = {'id': track_id, 'file': str(audio)}
+        if metadata:
+            with metadata.open('x', encoding='utf-8') as stream:
+                created.append(metadata)
+                json.dump(track, stream, ensure_ascii=False, indent=2)
+                stream.write('\n')
+            entry['metadata'] = str(metadata)
+        return 'downloaded', entry
+    except BaseException:
+        for path in created:
+            path.unlink()
+        raise
+
+
+def download(args):
+    if args.all == bool(args.ids):
+        raise ValueError('Provide track IDs or song URLs, or --all, but not both.')
+    if not 1 <= args.jobs <= 16:
+        raise ValueError('--jobs must be between 1 and 16.')
+    if args.all:
+        tracks = {}
+        page = 0
+        while True:
+            batch = api(args, '/api/get?' + urllib.parse.urlencode({'page': page}))
+            new = {track['id']: track for track in batch if track['id'] not in tracks}
+            if not new:
+                break
+            tracks.update(new)
+            page += 1
+        selected = [track for track in tracks.values() if track.get('status') == 'complete']
+    else:
+        ids = list(dict.fromkeys(song_id(value) for value in args.ids))
+        found = {}
+        # Keep requests bounded for large selections and preserve the requested order.
+        for offset in range(0, len(ids), 50):
+            batch = api(args, '/api/get?' + urllib.parse.urlencode({'ids': ','.join(ids[offset:offset + 50])}))
+            found.update((track['id'], track) for track in batch)
+        selected = [found.get(track_id, {'id': track_id}) for track_id in ids]
+    args.output.mkdir(parents=True, exist_ok=True)
+    summary = {'downloaded': [], 'skipped': [], 'errors': []}
+
+    def transfer(track):
+        try:
+            return download_track(args, track)
+        except (OSError, ValueError, RuntimeError, http.client.HTTPException) as error:
+            return 'errors', {'id': track['id'], 'error': str(error)}
+
+    with ThreadPoolExecutor(max_workers=args.jobs) as workers:
+        for status, entry in workers.map(transfer, selected):
+            summary[status].append(entry)
+            if status == 'errors':
+                print(f"Download failed for {entry['id']}: {entry['error']}", file=sys.stderr)
+    return summary
 
 
 def run(args):
@@ -199,28 +331,7 @@ def run(args):
         query = urllib.parse.urlencode({'ids': ','.join(args.ids)}) if args.ids else ''
         return api(args, '/api/get' + ('?' + query if query else ''))
     if args.command == 'download':
-        if not re.fullmatch(r'[A-Za-z0-9-]+', args.id):
-            raise ValueError('Invalid track ID.')
-        tracks = api(args, '/api/get?' + urllib.parse.urlencode({'ids': args.id}))
-        track = next((track for track in tracks if track['id'] == args.id), None)
-        if not track or track.get('status') != 'complete' or not track.get('audio_url'):
-            raise RuntimeError('Track is not complete or has no audio URL. Check `suno list`.')
-        url = track['audio_url']
-        if urllib.parse.urlsplit(url).scheme not in ('http', 'https'):
-            raise RuntimeError('Backend returned an invalid audio URL.')
-        args.output.mkdir(parents=True, exist_ok=True)
-        destination = args.output / (args.id + '.mp3')
-        # Exclusive creation protects existing downloads. Delete only this partial file on failure.
-        with destination.open('xb') as stream:
-            try:
-                request = urllib.request.Request(url, headers={'User-Agent': USER_AGENT})
-                with urllib.request.urlopen(request, timeout=args.timeout) as response:
-                    while block := response.read(65536):
-                        stream.write(block)
-            except Exception:
-                destination.unlink()
-                raise
-        return {'file': str(destination)}
+        return download(args)
 
 
 def main(argv=None):
@@ -229,8 +340,9 @@ def main(argv=None):
     if args.timeout <= 0:
         cli.error('--timeout must be positive')
     try:
-        print(json.dumps(run(args), indent=2))
-        return 0
+        result = run(args)
+        print(json.dumps(result, indent=2))
+        return 1 if args.command == 'download' and result['errors'] else 0
     except ValueError as error:
         print(f'error: {error}', file=sys.stderr)
         return 2

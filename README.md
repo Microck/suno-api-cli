@@ -59,9 +59,16 @@ suno credits
 suno list
 suno list TRACK_ID
 suno download TRACK_ID --output ./songs
+suno download 'https://suno.com/song/TRACK_ID' --metadata --output ./songs
+suno download ID_ONE ID_TWO --output ./songs
+suno download --all --metadata --skip-existing --output ./songs
 ```
 
-downloads require a completed track and refuse to overwrite an existing file. errors go to stderr. a generation timeout does not prove the song failed; check `suno list` before trying again.
+downloads save playable M4A, MP3, or WAV audio with a readable title and full track ID in the filename. `--all` walks your library pages and selects completed songs. `--metadata` saves a matching JSON file with prompts, lyrics, tags, and track details. downloads run four at a time; use `--jobs 1` for sequential transfers. the backend requests Suno-issued playback rights and decrypts encrypted audio as it streams. keys stay inside the backend.
+
+existing files stay protected. `--skip-existing` skips nonempty downloads; when metadata is requested, both files must exist. empty, truncated, or unplayable transfers fail and remove their partial files. the JSON summary contains `downloaded`, `skipped`, and `errors`; any failed track makes the command exit with code 1, while successful downloads stay saved.
+
+errors go to stderr. a generation timeout does not prove the song failed; check `suno list` before trying again.
 
 ## configuration
 
@@ -84,8 +91,11 @@ the bundled backend uses Next.js development mode and is for local use. it has n
 ```sh
 npm ci
 npm test
+npm run test:media
 npm run check
 ```
+
+the media tests require Node.js 22.18+ or 24+. runtime use supports Node.js 20+.
 
 see [backend notes](docs/backend.md) for upstream attribution, patches, and verification. `npm uninstall -g suno-api-cli` removes the CLI. stop and disable any installed systemd service before uninstalling; user data and credentials remain in your home directory.
 

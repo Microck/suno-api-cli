@@ -18,5 +18,6 @@ jobs:
           python-version: '3.12'
       - run: npm ci --ignore-scripts
       - run: npm test
+      - run: npm run test:media
       - run: npm run check
       - run: npm pack --dry-run

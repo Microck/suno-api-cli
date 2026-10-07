@@ -34,17 +34,51 @@ class BackendFixture(BaseHTTPRequestHandler):
             return self.respond(200, {'credits_left': 300})
         if self.path.startswith('/api/get?ids=failed'):
             return self.respond(200, [{'id': 'failed', 'status': 'error'}])
-        if self.path.startswith('/api/get?ids=track-1'):
-            return self.respond(200, [{'id': 'track-1', 'status': 'complete',
-                                      'audio_url': f'http://127.0.0.1:{self.server.server_port}/audio'}])
-        if self.path == '/audio':
+        if self.path == '/api/get?page=0':
+            return self.respond(200, [self.track('track-1'), {'id': 'waiting', 'status': 'submitted'}])
+        if self.path == '/api/get?page=1':
+            return self.respond(200, [self.track('track-2')])
+        if self.path.startswith('/api/get?ids=track-'):
+            ids = self.path.split('ids=', 1)[1].replace('%2C', ',').split(',')
+            return self.respond(200, [self.track(track_id) for track_id in ids if track_id in ('track-1', 'track-2')])
+        if self.path == '/api/get?ids=empty':
+            track = self.track('empty')
+            track['media_urls'][0]['url'] += '-empty'
+            return self.respond(200, [track])
+        if self.path == '/api/get?ids=truncated':
+            track = self.track('truncated')
+            track['media_urls'][0]['url'] += '-truncated'
+            return self.respond(200, [track])
+        if self.path == '/api/get?ids=encrypted':
+            return self.respond(200, [self.track('encrypted')])
+        if self.path == '/api/download?id=encrypted':
             self.send_response(200)
             self.end_headers()
-            self.wfile.write(b'real HTTP audio fixture')
+            self.wfile.write(b'opaque ciphertext without an audio header')
+            return
+        if self.path in ('/api/download?id=empty', '/api/download?id=truncated'):
+            self.send_response(200)
+            self.send_header('Content-Length', '100' if self.path.endswith('truncated') else '0')
+            self.end_headers()
+            if self.path.endswith('truncated'):
+                self.wfile.write(b'partial')
+            self.close_connection = True
+            return
+        if self.path.startswith('/api/download?id=track-'):
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b'\x00\x00\x00\x18ftypM4A fixture audio')
             return
         if self.path == '/api/get?ids=unauthorized':
             return self.respond(403, {'error': 'Session expired'})
         return self.respond(200, [])
+
+    def track(self, track_id):
+        return {'id': track_id, 'title': '../../Rain: song?', 'status': 'complete',
+                'prompt': 'verse\nchorus', 'tags': 'folk',
+                'audio_url': 'https://studio-api.prod.suno.com/api/forbidden',
+                'media_urls': [{'url': f'http://127.0.0.1:{self.server.server_port}/audio',
+                                'content_type': 'm4a-opus', 'delivery': 'progressive'}]}
 
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
@@ -114,15 +148,81 @@ class CliTests(TestCase):
         with tempfile.TemporaryDirectory() as folder:
             code, out, _ = self.call('download', 'track-1', '--output', folder)
             self.assertEqual(code, 0)
-            target = Path(json.loads(out)['file'])
-            self.assertEqual(target.read_bytes(), b'real HTTP audio fixture')
+            target = Path(json.loads(out)['downloaded'][0]['file'])
+            self.assertEqual(target.read_bytes(), b'\x00\x00\x00\x18ftypM4A fixture audio')
             code, _, _ = self.call('download', 'track-1', '--output', folder)
             self.assertEqual(code, 1)
-            self.assertEqual(target.read_bytes(), b'real HTTP audio fixture')
+            self.assertEqual(target.read_bytes(), b'\x00\x00\x00\x18ftypM4A fixture audio')
+
+    def test_multiple_song_links_preserve_metadata_and_deduplicate(self):
+        with tempfile.TemporaryDirectory() as folder:
+            code, out, _ = self.call('download', 'https://suno.com/song/track-1?share=1',
+                                    'track-1', 'track-2', '--metadata', '--output', folder)
+            self.assertEqual(code, 0)
+            downloaded = json.loads(out)['downloaded']
+            self.assertEqual(len(downloaded), 2)
+            for entry in downloaded:
+                audio = Path(entry['file'])
+                self.assertEqual(audio.parent, Path(folder))
+                self.assertEqual(audio.read_bytes(), b'\x00\x00\x00\x18ftypM4A fixture audio')
+                metadata = json.loads(Path(entry['metadata']).read_text())
+                self.assertEqual(metadata['prompt'], 'verse\nchorus')
+                self.assertIn(metadata['id'], audio.name)
+                self.assertEqual(audio.suffix, '.m4a')
+
+    def test_library_paginates_and_skip_existing_is_explicit(self):
+        with tempfile.TemporaryDirectory() as folder:
+            code, out, _ = self.call('download', '--all', '--output', folder)
+            self.assertEqual(code, 0)
+            self.assertEqual(len(json.loads(out)['downloaded']), 2)
+            code, out, _ = self.call('download', '--all', '--skip-existing', '--output', folder)
+            self.assertEqual(code, 0)
+            self.assertEqual(len(json.loads(out)['skipped']), 2)
+            self.assertEqual(json.loads(out)['downloaded'], [])
+
+    def test_empty_and_truncated_transfers_leave_no_files(self):
+        for track_id in ('empty', 'truncated', 'encrypted'):
+            with self.subTest(track_id=track_id), tempfile.TemporaryDirectory() as folder:
+                code, out, _ = self.call('download', track_id, '--metadata', '--output', folder)
+                self.assertEqual(code, 1)
+                self.assertEqual(len(json.loads(out)['errors']), 1)
+                self.assertEqual(list(Path(folder).iterdir()), [])
+
+    def test_batch_keeps_successes_and_reports_missing_tracks(self):
+        with tempfile.TemporaryDirectory() as folder:
+            code, out, _ = self.call('download', 'track-1', 'missing', '--output', folder)
+            self.assertEqual(code, 1)
+            summary = json.loads(out)
+            self.assertEqual(len(summary['downloaded']), 1)
+            self.assertEqual(summary['errors'][0]['id'], 'missing')
+
+    def test_partial_existing_pair_and_empty_file_are_not_skipped(self):
+        with tempfile.TemporaryDirectory() as folder:
+            code, out, _ = self.call('download', 'track-1', '--output', folder)
+            self.assertEqual(code, 0)
+            audio = Path(json.loads(out)['downloaded'][0]['file'])
+            code, _, _ = self.call('download', 'track-1', '--metadata', '--skip-existing', '--output', folder)
+            self.assertEqual(code, 1)
+            self.assertEqual(audio.read_bytes(), b'\x00\x00\x00\x18ftypM4A fixture audio')
+            audio.write_bytes(b'')
+            code, _, _ = self.call('download', 'track-1', '--skip-existing', '--output', folder)
+            self.assertEqual(code, 1)
+            self.assertEqual(audio.read_bytes(), b'')
+
+    def test_invalid_selection_and_urls_fail_before_creating_files(self):
+        selections = [[], ['--all', 'track-1'], ['track-1', '--jobs', '0'],
+                      ['https://example.com/song/track-1'], ['../track-1'],
+                      ['https://suno.com/playlist/track-1']]
+        for selection in selections:
+            with self.subTest(selection=selection), tempfile.TemporaryDirectory() as folder:
+                code, out, _ = self.call('download', *selection, '--output', folder)
+                self.assertEqual((code, out), (2, ''))
+                self.assertEqual(list(Path(folder).iterdir()), [])
 
     def test_failed_track_not_downloaded(self):
         code, out, err = self.call('download', 'failed')
-        self.assertEqual((code, out), (1, ''))
+        self.assertEqual(code, 1)
+        self.assertEqual(json.loads(out)['errors'][0]['id'], 'failed')
         self.assertIn('not complete', err)
 
 

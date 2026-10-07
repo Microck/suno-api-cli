@@ -1,6 +1,6 @@
 {
   "name": "suno-api-cli",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Generate and download Suno music from your terminal, with renewable login and 2Captcha support.",
   "license": "MIT",
   "author": "Microck <contact@micr.dev>",
@@ -37,6 +37,7 @@
   ],
   "scripts": {
     "test": "python3 -m unittest discover -s tests",
-    "check": "python3 -m py_compile suno.py && node --check bin/suno.cjs"
+    "check": "python3 -m py_compile suno.py && node --check bin/suno.cjs",
+    "test:media": "node --experimental-strip-types --test tests/media.test.mjs"
   }
 }

@@ -10,6 +10,8 @@ import { BrowserContext, Page, Locator, chromium, firefox } from 'rebrowser-play
 import { createCursor, Cursor } from 'ghost-cursor-playwright';
 import { promises as fs } from 'fs';
 import path from 'node:path';
+import { Readable, pipeline } from 'node:stream';
+import { createAudioDecipher, MangoRights } from '@/lib/media';
 
 // sunoApi instance caching
 const globalForSunoApi = global as unknown as { sunoApiCache?: Map<string, SunoApi> };
@@ -18,6 +20,10 @@ globalForSunoApi.sunoApiCache = cache;
 
 const logger = pino();
 export const DEFAULT_MODEL = 'chirp-v3-5';
+const AUDIO_CONTENT_TYPES = new Map([
+  ['m4a-opus', 'audio/mp4'], ['m4a', 'audio/mp4'], ['audio/mp4', 'audio/mp4'],
+  ['mp3', 'audio/mpeg'], ['audio/mpeg', 'audio/mpeg'], ['wav', 'audio/wav'], ['audio/wav', 'audio/wav']
+]);
 
 export interface AudioInfo {
   id: string; // Unique identifier for the audio
@@ -25,6 +31,7 @@ export interface AudioInfo {
   image_url?: string; // URL of the image associated with the audio
   lyric?: string; // Lyrics of the audio
   audio_url?: string; // URL of the audio file
+  media_urls?: { url: string; content_type: string; delivery: string; encoding?: string }[];
   video_url?: string; // URL of the video associated with the audio
   created_at: string; // Date and time when the audio was created
   model_name: string; // Name of the model used for audio generation
@@ -809,6 +816,7 @@ class SunoApi {
         ? this.parseLyrics(audio.metadata.prompt)
         : '',
       audio_url: audio.audio_url,
+      media_urls: audio.media_urls,
       video_url: audio.video_url,
       created_at: audio.created_at,
       model_name: audio.model_name,
@@ -827,12 +835,46 @@ class SunoApi {
    * @param clipId The ID of the audio clip to retrieve information for.
    * @returns A promise that resolves to an object containing the audio clip information.
    */
-  public async getClip(clipId: string): Promise<object> {
+  public async getClip(clipId: string): Promise<AudioInfo> {
     await this.keepAlive(false);
     const response = await this.client.get(
       `${SunoApi.BASE_URL}/api/clip/${clipId}`
     );
     return response.data;
+  }
+
+  /** Fetch playback rights through the account, keeping keys and cookies inside the backend. */
+  public async downloadAudio(clipId: string) {
+    const clip = await this.getClip(clipId);
+    const media = clip.media_urls?.find(media => media.delivery === 'progressive' && AUDIO_CONTENT_TYPES.has(media.content_type));
+    const contentType = media && AUDIO_CONTENT_TYPES.get(media.content_type);
+    if (clip.status !== 'complete' || !media || !contentType) {
+      throw new Error('Track has no completed progressive audio.');
+    }
+    if (media.encoding && media.encoding !== '1.0.0') {
+      throw new Error('Unsupported Suno audio encoding.');
+    }
+    let decipher;
+    if (media.encoding === '1.0.0') {
+      const sessionToken = this.currentToken;
+      if (!sessionToken) throw new Error('A current account session is required for playback rights.');
+      const response = await this.client.post<MangoRights>(`${SunoApi.BASE_URL}/api/mango/rights`, {
+        content_params: { content_id: clipId, content_type: 'clip' }
+      }, { headers: { Authorization: `Bearer ${sessionToken}` } });
+      decipher = createAudioDecipher(clipId, response.data, sessionToken);
+    }
+    // Use standalone Axios so account authorization never follows audio to a CDN host.
+    const response = await axios.get<Readable>(media.url, {
+      responseType: 'stream', timeout: 30000,
+      headers: { 'User-Agent': this.userAgent }
+    });
+    let stream = response.data;
+    if (decipher) {
+      // pipeline propagates upstream failures and tears down the source on client cancellation.
+      pipeline(stream, decipher, () => {});
+      stream = decipher;
+    }
+    return { stream, contentType, length: response.headers['content-length'] };
   }
 
   public async get_credits(): Promise<object> {
