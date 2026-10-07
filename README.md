@@ -1,6 +1,4 @@
-<p align="center">
-  <img src=".github/assets/logo.png" alt="suno-api-cli" width="420">
-</p>
+
 
 <p align="center">
   <a href="https://www.npmjs.com/package/suno-api-cli"><img src="https://img.shields.io/npm/v/suno-api-cli?style=flat-square&label=npm&color=000000" alt="npm version"></a>
