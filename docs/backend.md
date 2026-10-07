@@ -32,7 +32,19 @@ seconds. Generation requests are never automatically retried.
 
 Live evidence before packaging: renewable session authentication succeeded,
 the account credits endpoint responded, and one paid Turnstile diagnostic
-succeeded. No song was submitted. Seven local HTTP fixture tests cover
-status, generation payloads, errors, lyrics, and download behavior. Backend
+succeeded. No song was submitted. Eight local tests cover
+status, generation payloads, errors, lyrics, download behavior, and private
+credential storage. Backend
 TypeScript and scoped ESLint passed. Strict lint reports five inherited errors
 and 17 warnings; those upstream issues were not changed.
+
+
+## Logo
+
+Generated with the built-in image generation tool, then edited to the final
+repository name. Saved at .github/assets/logo.png.
+
+Final prompt: preserve the true black background, white chevron and five-bar
+waveform mark. Set the text to exact lowercase "suno-api-cli", slightly smaller
+with generous horizontal margins. Minimal flat style, crisp edges, no gradients,
+shadows, frame, extra text, or official Suno logo.
