@@ -1,0 +1,42 @@
+{
+  "name": "suno-api-cli",
+  "version": "0.1.0",
+  "description": "Generate and download Suno music from your terminal, with renewable login and 2Captcha support.",
+  "license": "MIT",
+  "author": "Microck <contact@micr.dev>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Microck/suno-api-cli.git"
+  },
+  "homepage": "https://github.com/Microck/suno-api-cli#readme",
+  "bugs": {
+    "url": "https://github.com/Microck/suno-api-cli/issues"
+  },
+  "bin": {
+    "suno": "bin/suno.cjs"
+  },
+  "files": [
+    "bin/",
+    "suno.py",
+    "backend/",
+    "docs/",
+    "LICENSE",
+    "NOTICE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": [
+    "suno",
+    "suno-api",
+    "cli",
+    "music",
+    "ai-music",
+    "2captcha",
+    "turnstile"
+  ],
+  "scripts": {
+    "test": "python3 -m unittest discover -s tests",
+    "check": "python3 -m py_compile suno.py && node --check bin/suno.cjs"
+  }
+}

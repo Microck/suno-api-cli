@@ -1,0 +1,8 @@
+node_modules/
+.next/
+.jj/
+__pycache__/
+.ruff_cache/
+*.tsbuildinfo
+*.tgz
+.env*

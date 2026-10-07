@@ -1,0 +1,4 @@
+The CLI is MIT licensed. backend/ contains gcui-art/suno-api, upstream commit
+a2e6a823, licensed LGPL-3.0-or-later. Full modifiable source, LGPL and GPL
+license texts are included. See docs/backend.md for modifications and setup.
+https://github.com/gcui-art/suno-api
