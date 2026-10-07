@@ -1,6 +1,6 @@
 {
   "name": "suno-api-cli",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Generate and download Suno music from your terminal, with renewable login and 2Captcha support.",
   "license": "MIT",
   "author": "Microck <contact@micr.dev>",

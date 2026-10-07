@@ -13,7 +13,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-VERSION = '0.1.0'
+VERSION = '0.1.1'
 BACKEND = Path(os.environ.get('SUNO_BACKEND_DIR', Path.home() / '.local/share/suno-api-cli/backend'))
 BUNDLED_BACKEND = Path(__file__).resolve().parent / 'backend'
 CREDENTIALS = Path.home() / '.config/suno-api-cli/credentials.json'
